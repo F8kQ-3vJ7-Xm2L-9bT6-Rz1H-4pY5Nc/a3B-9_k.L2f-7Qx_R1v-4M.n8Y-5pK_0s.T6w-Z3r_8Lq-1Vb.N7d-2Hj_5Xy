@@ -1,1 +1,675 @@
-print("hi")
+-- [[ STARTUP NOTIFICATION ]] --
+pcall(function()
+    game:GetService("StarterGui"):SetCore("SendNotification", {
+        Title = "Script loaded enjoy!",
+        Text = "Credits in Credits tab", 
+        Duration = 5 
+    })
+end)
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
+local VIM = game:GetService("VirtualInputManager")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+
+-- [[ FILE SAVING SYSTEM ]] --
+local SaveFileName = "UtilityHub_SaveData.json"
+local MySettings = {
+    WalkSpeed = 16,
+    Key = "F",
+    Pulse = 0.1,
+    Patience = 30
+}
+
+if isfile and isfile(SaveFileName) and readfile then
+    local success, loadedData = pcall(function()
+        return HttpService:JSONDecode(readfile(SaveFileName))
+    end)
+    if success and loadedData then 
+        MySettings.WalkSpeed = loadedData.WalkSpeed or 16
+        MySettings.Key = loadedData.Key or "F"
+        MySettings.Pulse = loadedData.Pulse or 0.1
+        MySettings.Patience = loadedData.Patience or 30
+    end
+end
+
+local function SaveToFile()
+    if writefile then
+        local success, encodedData = pcall(function()
+            return HttpService:JSONEncode(MySettings)
+        end)
+        if success then writefile(SaveFileName, encodedData) end
+    end
+end
+
+-- [[ MENU CREATION ]] --
+local Window = Rayfield:CreateWindow({
+   Name = "Utility Hub V17",
+   LoadingTitle = "Loading Scripts...",
+   LoadingSubtitle = "by uz",
+   ConfigurationSaving = { Enabled = false }
+})
+
+local MainTab = Window:CreateTab("Main Hacks", 4483362458)
+local ExtraTab = Window:CreateTab("Extra Scripts", 4483362458)
+local CreditsTab = Window:CreateTab("Credits", 4483362458)
+
+-- [[ STATE VARIABLES ]] --
+_G.TargetList = {}
+_G.CurrentTargetIndex = 1
+_G.Following = false
+_G.SmartTargeting = false
+_G.LoopSpeedValue = MySettings.WalkSpeed
+_G.SelectedKey = MySettings.Key
+_G.PulseDuration = MySettings.Pulse
+_G.PatienceTime = MySettings.Patience
+_G.FlingEnabled = false
+_G.LoopTPTool = false
+_G.PulseKey = false
+_G.LoopServerHop = false
+_G.WasDead = false 
+_G.LastChar = nil
+_G.SpawnTime = tick()
+_G.FlingStrikes = 0
+
+local wasInventoryEnabled = true
+local connections = {} 
+local HumanModCons = {} 
+local targetStartTime = tick()
+local lastTargetId = nil
+
+-- [[ HELPER FUNCTIONS ]] --
+local function sendNotify(title, text)
+    pcall(function() StarterGui:SetCore("SendNotification", { Title = title, Text = text, Duration = 3 }) end)
+end
+
+local function getPlayerNames()
+    local names = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then table.insert(names, plr.DisplayName .. " (@" .. plr.Name .. ")") end
+    end
+    return names
+end
+
+local function getUserIdFromFormat(formattedString)
+    local username = string.match(formattedString, "@(.-)%)$")
+    if username then
+        local plr = Players:FindFirstChild(username)
+        if plr then return plr.UserId end
+    end
+    return nil
+end
+
+local function getFormattedNameFromId(id)
+    if not id then return "Unknown" end
+    local plr = Players:GetPlayerByUserId(id)
+    if plr then return plr.DisplayName .. " (@" .. plr.Name .. ")" end
+    return "Offline Player"
+end
+
+local function getNextValidTargetIndex(startIndex)
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return startIndex + 1 end 
+    
+    local checkCount = 0
+    local currentIndex = startIndex + 1
+    
+    while checkCount < #_G.TargetList do
+        if currentIndex > #_G.TargetList then currentIndex = 1 end
+        
+        local id = _G.TargetList[currentIndex]
+        local targetPlr = Players:GetPlayerByUserId(id)
+        
+        if targetPlr and targetPlr.Character then
+            local tRoot = targetPlr.Character:FindFirstChild("HumanoidRootPart")
+            local tHum = targetPlr.Character:FindFirstChild("Humanoid")
+            
+            if tRoot and tHum and tHum.Health > 0 then
+                local dist = (tRoot.Position - myRoot.Position).Magnitude
+                if dist < 1000 then
+                    return currentIndex 
+                end
+            end
+        end
+        currentIndex = currentIndex + 1
+        checkCount = checkCount + 1
+    end
+    return startIndex + 1 
+end
+
+local function advanceTarget(reason, oldId)
+    if #_G.TargetList <= 1 then 
+        targetStartTime = tick() 
+        return 
+    end
+    
+    _G.CurrentTargetIndex = getNextValidTargetIndex(_G.CurrentTargetIndex)
+    
+    local newId = _G.TargetList[_G.CurrentTargetIndex]
+    local oldName = getFormattedNameFromId(oldId)
+    local newName = getFormattedNameFromId(newId)
+    
+    if reason == "flung" then sendNotify("Detected Flung!", oldName .. " flung! Switching to: " .. newName)
+    elseif reason == "timeout" then sendNotify("Timeout", oldName .. " evaded for " .. tostring(_G.PatienceTime) .. "s. Switching to: " .. newName)
+    elseif reason == "dead" then sendNotify("Target Dead", oldName .. " died. Switching to: " .. newName)
+    elseif reason == "offline" then sendNotify("Target Left", oldName .. " left. Switching to: " .. newName)
+    end
+    
+    targetStartTime = tick()
+    lastTargetId = newId
+end
+
+local function getSafeKeyCode(str)
+    local success, code = pcall(function() return Enum.KeyCode[str:upper()] end)
+    return success and code or nil
+end
+
+-- CRASH-PROOF MAX SPEED SERVER HOP
+local function performServerHop()
+    local servers = {}
+    -- Wrapped in pcall so it doesn't crash your script when Roblox rate-limits you
+    local success, req = pcall(function()
+        return game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Desc&limit=100&excludeFullGames=true")
+    end)
+    
+    if success and req then
+        local body = HttpService:JSONDecode(req)
+        if body and body.data then
+            for _, v in next, body.data do
+                if type(v) == "table" and tonumber(v.playing) and tonumber(v.maxPlayers) and v.playing < v.maxPlayers and v.id ~= game.JobId then
+                    table.insert(servers, 1, v.id)
+                end
+            end
+        end
+    end
+    
+    if #servers > 0 then
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, servers[math.random(1, #servers)], LocalPlayer)
+    end
+end
+
+-- [[ 1. MULTI-TARGET SYSTEM ]] --
+local FollowDropdown = MainTab:CreateDropdown({
+    Name = "Select Targets (Hitlist)",
+    Options = getPlayerNames(),
+    CurrentOption = {},
+    MultipleOptions = true,
+    Flag = "FollowDropdown",
+    Callback = function(Options)
+        _G.TargetList = {}
+        for _, opt in ipairs(Options) do
+            local id = getUserIdFromFormat(opt)
+            if id then table.insert(_G.TargetList, id) end
+        end
+        _G.CurrentTargetIndex = 1
+        
+        if #_G.TargetList == 1 then
+            sendNotify("Target Locked", "Relentlessly tracking: " .. getFormattedNameFromId(_G.TargetList[1]))
+        elseif #_G.TargetList > 1 then
+            sendNotify("Hitlist Updated", "Tracking " .. tostring(#_G.TargetList) .. " targets.")
+        end
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Select All Players",
+    Callback = function()
+        local allNames = getPlayerNames()
+        FollowDropdown:Set(allNames)
+        sendNotify("Hitlist", "Selected all players in the server.")
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Deselect All Players",
+    Callback = function()
+        FollowDropdown:Set({})
+        sendNotify("Hitlist", "Deselected all players.")
+    end,
+})
+
+Players.PlayerAdded:Connect(function() FollowDropdown:Refresh(getPlayerNames(), true) end)
+Players.PlayerRemoving:Connect(function() FollowDropdown:Refresh(getPlayerNames(), true) end)
+
+MainTab:CreateToggle({
+    Name = "Follow Target(s)",
+    CurrentValue = false,
+    Flag = "FollowToggle",
+    Callback = function(Value)
+        _G.Following = Value
+        sendNotify("Follow System", Value and "Started chasing" or "Stopped chasing")
+        
+        if connections.Follow then connections.Follow:Disconnect() end
+        if Value then
+            connections.Follow = RunService.Heartbeat:Connect(function()
+                if not _G.Following or #_G.TargetList == 0 then return end
+                
+                local myChar = LocalPlayer.Character
+                local myHum = myChar and myChar:FindFirstChild("Humanoid")
+                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                
+                if myChar ~= _G.LastChar then
+                    _G.LastChar = myChar
+                    _G.SpawnTime = tick()
+                    _G.FlingStrikes = 0
+                end
+                
+                if not myHum or myHum.Health <= 0 then
+                    if not _G.WasDead then
+                        _G.WasDead = true
+                        sendNotify("Targeting Paused", "You died. Waiting to respawn...")
+                    end
+                    return 
+                elseif _G.WasDead then
+                    _G.WasDead = false
+                    targetStartTime = tick() 
+                    sendNotify("Targeting Resumed", "You are alive. Chasing target again.")
+                end
+                
+                if _G.CurrentTargetIndex > #_G.TargetList then _G.CurrentTargetIndex = 1 end
+                
+                local currentTargetId = _G.TargetList[_G.CurrentTargetIndex]
+                local targetPlr = Players:GetPlayerByUserId(currentTargetId)
+                
+                if not targetPlr then
+                    advanceTarget("offline", currentTargetId)
+                    return
+                end
+                
+                if tick() - _G.SpawnTime > 3 and myRoot and myHum and myHum.Health > 0 then
+                    if myRoot.Velocity.Magnitude > 250 then
+                        local nearestDist = math.huge
+                        for _, p in ipairs(Players:GetPlayers()) do
+                            if p ~= LocalPlayer and p.Character then
+                                local pRoot = p.Character:FindFirstChild("HumanoidRootPart")
+                                if pRoot then
+                                    local d = (pRoot.Position - myRoot.Position).Magnitude
+                                    if d < nearestDist then
+                                        nearestDist = d
+                                    end
+                                end
+                            end
+                        end
+                        
+                        if nearestDist > 500 then
+                            _G.FlingStrikes = _G.FlingStrikes + 1
+                            if _G.FlingStrikes > 5 then
+                                myHum.Health = 0 
+                                _G.FlingStrikes = 0
+                                return
+                            end
+                        else
+                            _G.FlingStrikes = 0 
+                        end
+                    else
+                        _G.FlingStrikes = 0 
+                    end
+                end
+                
+                local targetRoot = targetPlr.Character and targetPlr.Character:FindFirstChild("HumanoidRootPart")
+                
+                if targetPlr.Character and targetRoot then
+                    local targetHum = targetPlr.Character:FindFirstChild("Humanoid")
+                    if targetHum and targetHum.Health > 0 then
+                        if myHum and myHum.Health > 0 then
+                            myHum:MoveTo(targetRoot.Position)
+                        end
+                    else
+                        advanceTarget("dead", currentTargetId)
+                    end
+                else
+                    advanceTarget("dead", currentTargetId)
+                end
+            end)
+        end
+    end,
+})
+
+-- [[ SMART PATIENCE TIMER ]] --
+MainTab:CreateInput({
+    Name = "Patience Timer (Saved: " .. tostring(MySettings.Patience) .. "s)",
+    PlaceholderText = "Enter Seconds (e.g. 30)",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        local num = tonumber(Text)
+        if num then
+            _G.PatienceTime = num
+            MySettings.Patience = num
+            SaveToFile()
+            sendNotify("Timer Saved", "Patience timer set to " .. tostring(num) .. "s")
+        end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Enable Smart Patience Timer",
+    CurrentValue = false,
+    Flag = "SmartTargetToggle",
+    Callback = function(Value)
+        _G.SmartTargeting = Value
+        sendNotify("Patience Timer", Value and "Smart Targeting Active" or "Smart Targeting Disabled")
+        
+        if connections.SmartTarget then connections.SmartTarget:Disconnect() end
+        if Value then
+            connections.SmartTarget = RunService.Heartbeat:Connect(function()
+                if _G.Following and _G.FlingEnabled and _G.SmartTargeting and #_G.TargetList > 0 and not _G.WasDead then
+                    if _G.CurrentTargetIndex > #_G.TargetList then _G.CurrentTargetIndex = 1 end
+                    local currentId = _G.TargetList[_G.CurrentTargetIndex]
+                    
+                    if currentId ~= lastTargetId then
+                        targetStartTime = tick()
+                        lastTargetId = currentId
+                    end
+                    
+                    local targetPlr = Players:GetPlayerByUserId(currentId)
+                    if not targetPlr then return end 
+                    
+                    local myChar = LocalPlayer.Character
+                    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                    local targetRoot = targetPlr.Character and targetPlr.Character:FindFirstChild("HumanoidRootPart")
+                    
+                    if myRoot and targetRoot then
+                        local dist = (targetRoot.Position - myRoot.Position).Magnitude
+                        local timeElapsed = tick() - targetStartTime
+                        
+                        if dist > 1000 then
+                            if myRoot.Velocity.Magnitude < 250 then
+                                advanceTarget("flung", currentId)
+                            end
+                        elseif timeElapsed > _G.PatienceTime and #_G.TargetList > 1 then
+                            advanceTarget("timeout", currentId)
+                        end
+                    end
+                end
+            end)
+        end
+    end,
+})
+
+MainTab:CreateDivider()
+
+-- [[ 2. LOOP WALKSPEED ]] --
+MainTab:CreateInput({
+    Name = "WalkSpeed Value (Saved: " .. tostring(MySettings.WalkSpeed) .. ")",
+    PlaceholderText = "Enter Number",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        local number = tonumber(Text)
+        if number then 
+            _G.LoopSpeedValue = number 
+            MySettings.WalkSpeed = number
+            SaveToFile()
+            sendNotify("WalkSpeed Set", "Speed saved as " .. tostring(number))
+        end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Loop WalkSpeed",
+    CurrentValue = false,
+    Flag = "LoopWSToggle",
+    Callback = function(Value)
+        sendNotify("Loop WalkSpeed", Value and "Enabled" or "Disabled")
+        local function WalkSpeedChange()
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChild("Humanoid")
+            if hum then hum.WalkSpeed = _G.LoopSpeedValue end
+        end
+
+        if Value then
+            WalkSpeedChange()
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChild("Humanoid")
+            if hum then HumanModCons.wsLoop = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(WalkSpeedChange) end
+            
+            HumanModCons.wsCA = LocalPlayer.CharacterAdded:Connect(function(nChar)
+                local nHum = nChar:WaitForChild("Humanoid", 5)
+                if nHum then
+                    WalkSpeedChange()
+                    HumanModCons.wsLoop = nHum:GetPropertyChangedSignal("WalkSpeed"):Connect(WalkSpeedChange)
+                end
+            end)
+        else
+            if HumanModCons.wsLoop then HumanModCons.wsLoop:Disconnect() HumanModCons.wsLoop = nil end
+            if HumanModCons.wsCA then HumanModCons.wsCA:Disconnect() HumanModCons.wsCA = nil end
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChild("Humanoid")
+            if hum then hum.WalkSpeed = 16 end
+        end
+    end,
+})
+
+MainTab:CreateDivider()
+
+-- [[ 3. AUTO KEY PRESS ]] --
+MainTab:CreateInput({
+    Name = "Key to Hold (Saved: " .. MySettings.Key .. ")",
+    PlaceholderText = "Enter Key Letter",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        _G.SelectedKey = Text
+        MySettings.Key = Text
+        SaveToFile()
+        sendNotify("Key Saved", "Will now use key: " .. tostring(Text):upper())
+    end,
+})
+
+MainTab:CreateInput({
+    Name = "Hold Duration (Saved: " .. tostring(MySettings.Pulse) .. "s)",
+    PlaceholderText = "e.g. 0.1",
+    RemoveTextAfterFocusLost = false,
+    Callback = function(Text)
+        local num = tonumber(Text)
+        if num then
+            _G.PulseDuration = num
+            MySettings.Pulse = num
+            SaveToFile()
+            sendNotify("Duration Saved", "Hold duration set to " .. tostring(num) .. "s")
+        end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Hold Key",
+    CurrentValue = false,
+    Flag = "PulseKeyToggle",
+    Callback = function(Value)
+        sendNotify("Hold Key", Value and "Enabled" or "Disabled")
+        _G.PulseKey = Value
+        if Value then
+            task.spawn(function()
+                while _G.PulseKey do
+                    local keyCode = getSafeKeyCode(_G.SelectedKey)
+                    if keyCode then
+                        VIM:SendKeyEvent(true, keyCode, false, game)
+                        task.wait(_G.PulseDuration) 
+                        VIM:SendKeyEvent(false, keyCode, false, game)
+                    end
+                    task.wait() 
+                end
+            end)
+        end
+    end,
+})
+
+MainTab:CreateDivider()
+
+-- [[ 4. TOUCH FLING SYSTEM ]] --
+MainTab:CreateToggle({
+    Name = "Fling On Touch",
+    CurrentValue = false,
+    Flag = "TouchFlingToggle",
+    Callback = function(Value)
+        sendNotify("Touch Fling", Value and "Enabled" or "Disabled")
+        _G.FlingEnabled = Value
+        if Value then
+            task.spawn(function()
+                local movel = 0.1
+                while _G.FlingEnabled do
+                    RunService.Heartbeat:Wait()
+                    local char = LocalPlayer.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    
+                    if hrp then
+                        local vel = hrp.Velocity
+                        hrp.Velocity = vel * 10000 + Vector3.new(0, 10000, 0)
+                        RunService.RenderStepped:Wait()
+                        if char and hrp and hrp.Parent then hrp.Velocity = vel end
+                        RunService.Stepped:Wait()
+                        if char and hrp and hrp.Parent then 
+                            hrp.Velocity = vel + Vector3.new(0, movel, 0)
+                            movel = -movel
+                        end
+                    end
+                end
+            end)
+        end
+    end,
+})
+
+MainTab:CreateDivider()
+
+-- [[ 5. TELEPORT TOOL ]] --
+local TPToolName = "Teleport Tool"
+MainTab:CreateToggle({
+    Name = "Loop Give Teleport Tool",
+    CurrentValue = false,
+    Flag = "TPToolToggle",
+    Callback = function(Value)
+        sendNotify("Teleport Tool", Value and "Enabled" or "Disabled")
+        _G.LoopTPTool = Value
+        if Value then
+            task.spawn(function()
+                while _G.LoopTPTool do
+                    local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+                    local char = LocalPlayer.Character
+                    if _G.LoopTPTool and backpack and char then
+                        if not backpack:FindFirstChild(TPToolName) and not char:FindFirstChild(TPToolName) then
+                            local TpTool = Instance.new("Tool")
+                            TpTool.Name = TPToolName
+                            TpTool.RequiresHandle = false
+                            TpTool.Parent = backpack
+                            TpTool.Activated:Connect(function()
+                                local root = char:FindFirstChild("HumanoidRootPart")
+                                local pos = Mouse.Hit
+                                if root and pos then
+                                    root.CFrame = CFrame.new(pos.X, pos.Y + 3, pos.Z, select(4, root.CFrame:components()))
+                                    root.Velocity = Vector3.new(0,0,0)
+                                    root.RotVelocity = Vector3.new(0,0,0)
+                                end
+                            end)
+                        end
+                    end
+                    task.wait(0.5) 
+                end
+            end)
+        else
+            local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+            local char = LocalPlayer.Character
+            if backpack and backpack:FindFirstChild(TPToolName) then backpack[TPToolName]:Destroy() end
+            if char and char:FindFirstChild(TPToolName) then char[TPToolName]:Destroy() end
+        end
+    end,
+})
+
+-- [[ 6. SHOW INVENTORY LOOP ]] --
+MainTab:CreateToggle({
+    Name = "Force Show Native Roblox Inventory",
+    CurrentValue = false,
+    Flag = "ShowInvToggle",
+    Callback = function(Value)
+        sendNotify("Force Inventory", Value and "Enabled" or "Disabled")
+        if Value then
+            pcall(function() wasInventoryEnabled = StarterGui:GetCoreGuiEnabled(Enum.CoreGuiType.Backpack) end)
+            connections.InventoryLoop = RunService.RenderStepped:Connect(function()
+                pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true) end)
+            end)
+        else
+            if connections.InventoryLoop then connections.InventoryLoop:Disconnect() end
+            pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, wasInventoryEnabled) end)
+        end
+    end,
+})
+
+-- [[ 7. EXTRA SERVER UTILITIES ]] --
+ExtraTab:CreateButton({
+    Name = "Server Hop",
+    Callback = function()
+        sendNotify("Server Hop", "Finding a new server...")
+        task.wait(1)
+        performServerHop()
+    end,
+})
+
+ExtraTab:CreateToggle({
+    Name = "Loop Server Hop (MAX SPEED)",
+    CurrentValue = false,
+    Flag = "LoopHopToggle",
+    Callback = function(Value)
+        _G.LoopServerHop = Value
+        sendNotify("Loop Server Hop", Value and "Enabled (Max Speed)" or "Disabled")
+        if Value then
+            task.spawn(function()
+                while _G.LoopServerHop do
+                    performServerHop()
+                    task.wait() 
+                end
+            end)
+        end
+    end,
+})
+
+ExtraTab:CreateButton({
+    Name = "Rejoin Server",
+    Callback = function()
+        sendNotify("Rejoin", "Rejoining current server...")
+        task.wait(1)
+        if #Players:GetPlayers() <= 1 then
+            LocalPlayer:Kick("\nRejoining...")
+            task.wait()
+            TeleportService:Teleport(game.PlaceId, LocalPlayer)
+        else
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+        end
+    end,
+})
+
+ExtraTab:CreateDivider()
+
+ExtraTab:CreateButton({
+    Name = "Execute Infinite Yield",
+    Callback = function()
+        sendNotify("Executing", "Loading Infinite Yield...")
+        loadstring(game:HttpGet('https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source'))()
+    end,
+})
+
+ExtraTab:CreateButton({
+    Name = "Execute 3rd-Party Anti-Fling",
+    Callback = function()
+        sendNotify("Executing", "Loading 3rd-Party Anti-Fling...")
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/sytcal/antifling/main/9999"))()
+    end,
+})
+
+-- [[ 8. CREDITS TAB ]] --
+CreditsTab:CreateLabel("Script by uz")
+CreditsTab:CreateLabel("GitHub Repository: uzThatCheatsAndCreates/rbxtargetscript")
+
+CreditsTab:CreateButton({
+    Name = "Copy GitHub Link",
+    Callback = function()
+        if setclipboard then
+            setclipboard("https://github.com/uzThatCheatsAndCreates/rbxtargetscript")
+            sendNotify("Copied!", "Link copied to clipboard.")
+        else
+            sendNotify("Error", "Your executor does not support clipboard copying.")
+        end
+    end,
+})
